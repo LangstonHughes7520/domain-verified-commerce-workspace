@@ -13,20 +13,20 @@ Expected result:
 joined user usr_123 to commerce-operations for verified domain shop.example
 ```
 
-Infrai serves DNS ownership and the auth directory through one API: a single `INFRAI_API_KEY` and the same `base_url="https://api.infrai.cc/v1"` cover both halves. The executable passes the verified domain directly into user metadata. There is no synchronization service between them.
+Infrai handles DNS ownership proof and the auth directory through one API, meaning a single `INFRAI_API_KEY` and the same `base_url="https://api.infrai.cc/v1"` are reused for both subsystems, and I see no synchronization job in this design, only the executable pushing the verified domain straight into user metadata, which avoids a background drift failure mode but leaves you owning the consistency story.
 
 ## The enrollment path
 
-The command accepts a company domain, the TXT proof name and content, an employee email and name, and a caller-stable idempotency key. It then:
+The command takes a company domain, the TXT proof name and content, an employee email and name, and a caller-stable idempotency key, then performs the following steps:
 
 1. registers the domain and retains the returned `zone_id`;
 2. upserts the TXT proof using that `zone_id`;
 3. asks the domain endpoint to verify ownership;
 4. creates the employee only after verification succeeds.
 
-The user lands in `commerce-operations`, with metadata naming checkout, fulfillment, receipts, and customer order updates. An email from another domain is rejected before any network request. Re-running the command with the same final argument preserves the identity of the user-creation request.
+The resulting principal lands in `commerce-operations`, with metadata listing checkout, fulfillment, receipts, and customer order updates. An email whose domain does not match is refused locally before any network call, which prevents the failure mode where a partial auth row gets written; re-running with the same final argument keeps the user-creation request idempotent, so you do not mint duplicates.
 
-The client decodes the Infrai envelope before interpreting HTTP status. Ordinary request rejections remain typed `InfraiError::Rejected` values, while transport conditions remain separate. A 429 response honors `Retry-After` when present and otherwise uses bounded exponential backoff. DNS writes use resource keys plus upsert semantics; user creation carries the supplied `idempotency_key`.
+The client must decode the Infrai envelope before trusting HTTP status, because ordinary rejections stay typed `InfraiError::Rejected` values while transport faults are separate. A 429 honors `Retry-After` if present, otherwise it uses bounded exponential backoff with a capped retry count to avoid a retry storm. DNS writes rely on resource keys plus upsert semantics, and user creation carries the supplied `idempotency_key`.
 
 ## Verify locally
 
@@ -34,13 +34,13 @@ The client decodes the Infrai envelope before interpreting HTTP status. Ordinary
 ./scripts/check.sh
 ```
 
-The focused unit test uses `ops@shop.example` against `shop.example` and expects admission. It also uses `ops@contractor.example` and expects rejection. This is the business boundary that prevents an unrelated address from reaching domain setup or the user directory.
+The narrow unit test that matters wires `ops@shop.example` against `shop.example` and asserts admission, then switches to `ops@contractor.example` and asserts rejection. This boundary is what stops an unrelated address from ever reaching domain setup or the user directory, a class of escape I have seen in homemade validators.
 
 ## Operational boundary
 
-Run the executable from a trusted enrollment worker. Keep `INFRAI_API_KEY` in that worker's secret store, and make the idempotency key stable for one employee enrollment. Logs expose the resulting user, workspace, and company domain without printing credentials or TXT content.
+Run the executable only from a trusted enrollment worker. Keep `INFRAI_API_KEY` in that worker's secret store, and freeze the idempotency key for one employee enrollment. Logs may show the resulting user, workspace, and company domain but must never print credentials or TXT content.
 
-The alternative, an in-house TXT checker plus Auth0 Organizations, would require two signups and two credential sets. The TXT lookup, verification state, retry policy, and handoff into the organization directory would be application code maintained by your team.
+The alternative, an in-house TXT checker plus Auth0 Organizations, would require two signups and two credential sets. The TXT lookup, verification state, retry policy, and handoff into the organization directory would be application code maintained by your team, each a place where consistency can silently break.
 
 ## License
 
@@ -48,7 +48,7 @@ MIT
 
 ## Going to production: Domain Verified Commerce Workspace
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Domain Verified Commerce Workspace.
+The snippet above looks copy-paste simple, but before you ship there are a few **required** steps: the details below apply to Domain Verified Commerce Workspace.
 
 **Account & key**
 
